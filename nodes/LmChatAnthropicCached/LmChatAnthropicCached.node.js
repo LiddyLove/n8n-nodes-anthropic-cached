@@ -61,7 +61,7 @@ function fromEnv(errors) {
  * Under pnpm those are real symlinks, so resolution from that package succeeds
  * where resolution from n8n's root does not. No hardcoded version hashes.
  */
-function fromN8nChain(errors) {
+function fromN8nChain(errors, pkg = PKG) {
 	const seeds = [];
 	if (require.main && require.main.filename) seeds.push(require.main.filename);
 	seeds.push(__filename);
@@ -77,7 +77,7 @@ function fromN8nChain(errors) {
 			} catch {
 				anchor = r.resolve('@n8n/n8n-nodes-langchain');
 			}
-			return createRequire(anchor)(PKG);
+			return createRequire(anchor)(pkg);
 		});
 		if (mod) return mod;
 	}
@@ -91,7 +91,7 @@ function fromN8nChain(errors) {
  * We match on the prefix and ignore the version and hash entirely, so this
  * survives n8n upgrades that the old hardcoded-path approach did not.
  */
-function fromPnpmStore(errors) {
+function fromPnpmStore(errors, pkg = PKG, prefix = '@langchain+anthropic@') {
 	const stores = [];
 	for (const base of N8N_ROOT_HINTS) {
 		const store = path.join(base, 'node_modules', '.pnpm');
@@ -111,13 +111,13 @@ function fromPnpmStore(errors) {
 			continue;
 		}
 		// Newest-looking first, so a multi-version install prefers the higher one.
-		const matches = entries.filter((d) => d.startsWith('@langchain+anthropic@')).sort().reverse();
+		const matches = entries.filter((d) => d.startsWith(prefix)).sort().reverse();
 		if (matches.length === 0) {
-			errors.push(`pnpm store ${store}: no @langchain+anthropic@* entry`);
+			errors.push(`pnpm store ${store}: no ${prefix}* entry`);
 			continue;
 		}
 		for (const dir of matches) {
-			const target = path.join(store, dir, 'node_modules', PKG);
+			const target = path.join(store, dir, 'node_modules', pkg);
 			const mod = attempt(errors, `pnpm ${dir}`, () => require(target));
 			if (mod) return mod;
 		}
@@ -172,6 +172,63 @@ for (const method of HOOKED_METHODS) {
 				`Check for an updated version of this node.`,
 		);
 	}
+}
+
+/* ------------------------------------------------------------------ */
+/* Optional: n8n's own LLM helpers                                     */
+/* ------------------------------------------------------------------ */
+
+/**
+ * N8nLlmTracing is what puts token counts and generations into the execution
+ * UI for the stock model sub-nodes; makeN8nLlmFailedAttemptHandler surfaces
+ * retry failures as proper n8n errors. Both live in @n8n/ai-utilities.
+ *
+ * This is strictly optional. Caching is the point of this node and works
+ * without it, so a resolution failure degrades to "no token counts in the UI"
+ * rather than refusing to load. The reason is recorded for the log.
+ */
+const AI_UTILITIES = (() => {
+	const errors = [];
+	const mod =
+		fromN8nChain(errors, '@n8n/ai-utilities') ||
+		fromPnpmStore(errors, '@n8n/ai-utilities', '@n8n+ai-utilities@') ||
+		attempt(errors, 'plain require', () => require('@n8n/ai-utilities'));
+
+	if (!mod || typeof mod.N8nLlmTracing !== 'function') {
+		console.warn(
+			`[lmChatAnthropicCached] Optional @n8n/ai-utilities not resolved; the node works ` +
+				`but token counts will not appear in the n8n execution UI. Tried: ${errors.join(' | ')}`,
+		);
+		return null;
+	}
+	return mod;
+})();
+
+/**
+ * Anthropic reports cached input separately from fresh input. The stock node's
+ * parser reads only `input_tokens`, so on a caching setup it under-reports
+ * prompt tokens by whatever came from cache — which here is most of them.
+ * Counting all three gives a prompt total that matches what was actually sent.
+ */
+function tokensUsageParser(result) {
+	const usage = (result && result.llmOutput && result.llmOutput.usage) || {};
+	const fresh = usage.input_tokens || 0;
+	const cacheRead = usage.cache_read_input_tokens || 0;
+	const cacheWrite = usage.cache_creation_input_tokens || 0;
+	const promptTokens = fresh + cacheRead + cacheWrite;
+	const completionTokens = usage.output_tokens || 0;
+	return {
+		completionTokens,
+		promptTokens,
+		totalTokens: promptTokens + completionTokens,
+		// Beyond n8n's declared TokenUsageResult shape. If the UI passes unknown
+		// keys through, these show the cache split where you are already looking;
+		// if it drops them, nothing above is affected. Either way the Anthropic
+		// Console remains the authoritative source.
+		cacheReadTokens: cacheRead,
+		cacheWriteTokens: cacheWrite,
+		uncachedInputTokens: fresh,
+	};
 }
 
 /* ------------------------------------------------------------------ */
@@ -432,6 +489,16 @@ class LmChatAnthropicCached {
 			config.anthropicApiUrl = options.baseURL;
 		} else if (credentials.url) {
 			config.anthropicApiUrl = credentials.url;
+		}
+
+		// Attach n8n's tracing so the execution UI shows generations and token
+		// counts, matching the stock node. Skipped silently if the optional
+		// helper package could not be resolved.
+		if (AI_UTILITIES) {
+			config.callbacks = [new AI_UTILITIES.N8nLlmTracing(this, { tokensUsageParser })];
+			if (typeof AI_UTILITIES.makeN8nLlmFailedAttemptHandler === 'function') {
+				config.onFailedAttempt = AI_UTILITIES.makeN8nLlmFailedAttemptHandler(this);
+			}
 		}
 
 		const model = new ChatAnthropicCached(config);
