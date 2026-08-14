@@ -1,0 +1,13 @@
+{
+  "name": "n8n-nodes-anthropic-cached",
+  "version": "0.1.0",
+  "description": "Anthropic Chat Model sub-node with prompt caching (cache_control) injection for AI Agent loops",
+  "license": "MIT",
+  "keywords": ["n8n-community-node-package"],
+  "main": "index.js",
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "nodes": ["nodes/LmChatAnthropicCached/LmChatAnthropicCached.node.js"],
+    "credentials": []
+  }
+}
