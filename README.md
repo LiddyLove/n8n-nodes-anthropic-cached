@@ -223,6 +223,12 @@ carry a warning naming what was tried.
 ## Support
 
 This node is free and MIT-licensed. If it saved you money and you feel like
+leaving a tip: **[ko-fi.com/liddylove](https://ko-fi.com/liddylove)**
+
+No obligation, and nothing is held back behind it.
+
+Bug reports and pull requests are just as welcome.
+This node is free and MIT-licensed. If it saved you money and you feel like
 leaving a tip, there's a Sponsor button at the top of the repo. No obligation,
 and nothing is held back behind it.
 
