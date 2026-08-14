@@ -1,13 +1,43 @@
 {
   "name": "n8n-nodes-anthropic-cached",
-  "version": "0.1.0",
-  "description": "Anthropic Chat Model sub-node with prompt caching (cache_control) injection for AI Agent loops",
+  "version": "0.2.0",
+  "description": "Anthropic Chat Model sub-node with prompt caching (cache_control) injection for n8n AI Agent loops",
   "license": "MIT",
-  "keywords": ["n8n-community-node-package"],
+  "author": {
+    "name": "LiddyLove",
+    "url": "https://github.com/LiddyLove"
+  },
+  "homepage": "https://github.com/LiddyLove/n8n-nodes-anthropic-cached#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LiddyLove/n8n-nodes-anthropic-cached.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LiddyLove/n8n-nodes-anthropic-cached/issues"
+  },
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "anthropic",
+    "claude",
+    "prompt-caching",
+    "cache-control"
+  ],
   "main": "index.js",
+  "files": [
+    "index.js",
+    "nodes",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.19"
+  },
   "n8n": {
     "n8nNodesApiVersion": 1,
-    "nodes": ["nodes/LmChatAnthropicCached/LmChatAnthropicCached.node.js"],
+    "nodes": [
+      "nodes/LmChatAnthropicCached/LmChatAnthropicCached.node.js"
+    ],
     "credentials": []
   }
 }
