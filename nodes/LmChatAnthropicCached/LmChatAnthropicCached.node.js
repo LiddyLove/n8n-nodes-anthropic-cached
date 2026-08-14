@@ -178,6 +178,19 @@ for (const method of HOOKED_METHODS) {
 /* cache_control injection                                             */
 /* ------------------------------------------------------------------ */
 
+/**
+ * The Anthropic SDK refuses non-streaming requests it estimates could exceed its
+ * 10-minute timeout. From client.calculateNonstreamingTimeout():
+ *
+ *   expectedTime = (60min * max_tokens) / 128000
+ *   throw if expectedTime > 10min
+ *
+ * Solving for max_tokens: anything above 21,333 throws. The SDK's error names
+ * streaming as the fix but not the number, and it surfaces mid-agent-run, so we
+ * check up front instead.
+ */
+const NONSTREAMING_MAX_TOKENS = 21333;
+
 const EPHEMERAL = { type: 'ephemeral' };
 
 // Content-block types that may NOT carry cache_control.
@@ -245,6 +258,37 @@ function applyCacheControl(request) {
 	return request;
 }
 
+/**
+ * Detect a response that hit the output cap.
+ *
+ * When generation stops at max_tokens partway through a tool_use block, the
+ * partial block still parses — into a tool call with no name and no arguments,
+ * which then fails somewhere downstream with an error that points nowhere near
+ * the real cause. Truncated prose is less dramatic but produces half-written
+ * output that reads as complete.
+ *
+ * Both get thrown here, where the cause is still legible.
+ */
+function assertNotTruncated(response, request) {
+	if (!response || response.stop_reason !== 'max_tokens') return;
+
+	const cap = request && request.max_tokens;
+	const truncatedToolUse =
+		Array.isArray(response.content) && response.content.some((b) => b && b.type === 'tool_use');
+
+	const detail = truncatedToolUse
+		? 'Generation was cut off partway through a tool call, which would surface later as a tool call with no name.'
+		: 'The response was cut off mid-output and is incomplete.';
+
+	throw new Error(
+		`[lmChatAnthropicCached] Response hit the output token cap` +
+			(cap ? ` (max_tokens: ${cap})` : '') +
+			`. ${detail} Raise "Maximum Number of Tokens" on the model node ` +
+			`(ceiling is ${NONSTREAMING_MAX_TOKENS} without streaming), or shorten what the agent ` +
+			`is being asked to produce in one turn.`,
+	);
+}
+
 /* ------------------------------------------------------------------ */
 /* Model subclass                                                      */
 /* ------------------------------------------------------------------ */
@@ -255,9 +299,14 @@ class ChatAnthropicCached extends ChatAnthropic {
 	}
 
 	async completionWithRetry(request, options) {
-		return super.completionWithRetry(applyCacheControl(request), options);
+		const response = await super.completionWithRetry(applyCacheControl(request), options);
+		if (this.errorOnTruncation !== false) assertNotTruncated(response, request);
+		return response;
 	}
 
+	// No truncation check here: streaming delivers stop_reason as a later event
+	// rather than on the returned object, so there is nothing to inspect at this
+	// point. Streaming is also exempt from the SDK's non-streaming token ceiling.
 	async createStreamWithRetry(request, options) {
 		return super.createStreamWithRetry(applyCacheControl(request), options);
 	}
@@ -295,6 +344,13 @@ class LmChatAnthropicCached {
 					description: 'Anthropic model ID (exact API model string)',
 				},
 				{
+					displayName:
+						'Set Maximum Number of Tokens below. Models newer than the bundled LangChain build fall back to a 4096 output cap, which truncates tool calls mid-block. Without streaming the ceiling is 21333.',
+					name: 'maxTokensNotice',
+					type: 'notice',
+					default: '',
+				},
+				{
 					displayName: 'Options',
 					name: 'options',
 					type: 'collection',
@@ -317,6 +373,14 @@ class LmChatAnthropicCached {
 							typeOptions: { minValue: 0, maxValue: 1, numberPrecision: 2 },
 							description:
 								'Leave unset on newer models — some reject sampling parameters entirely',
+						},
+						{
+							displayName: 'Error on Truncated Output',
+							name: 'errorOnTruncation',
+							type: 'boolean',
+							default: true,
+							description:
+								'Whether to throw when a response stops at the token cap. On by default because a truncated tool call otherwise surfaces as a nameless tool call, and truncated prose reads as complete output. Turn off to accept partial responses.',
 						},
 						{
 							displayName: 'Base URL',
@@ -349,6 +413,18 @@ class LmChatAnthropicCached {
 			config.maxTokens = options.maxTokens;
 		}
 
+		// Fail here rather than partway through an agent run. The SDK raises this
+		// on the first request, by which point the agent has already burned
+		// iterations and the error reads as a generic streaming complaint.
+		if (!config.streaming && config.maxTokens > NONSTREAMING_MAX_TOKENS) {
+			throw new Error(
+				`[lmChatAnthropicCached] Maximum Number of Tokens is ${config.maxTokens}, above the ` +
+					`${NONSTREAMING_MAX_TOKENS} ceiling the Anthropic SDK allows without streaming. ` +
+					`It derives this from (60min x max_tokens) / 128000 > 10min and rejects the request ` +
+					`outright. Lower the value to ${NONSTREAMING_MAX_TOKENS} or below.`,
+			);
+		}
+
 		// Same reasoning: newer models reject sampling params outright.
 		if (options.temperature !== undefined) config.temperature = options.temperature;
 
@@ -359,6 +435,10 @@ class LmChatAnthropicCached {
 		}
 
 		const model = new ChatAnthropicCached(config);
+
+		// Set after construction: ChatAnthropic's constructor would drop an
+		// unrecognised field, and this is ours rather than LangChain's.
+		model.errorOnTruncation = options.errorOnTruncation !== false;
 
 		return { response: model };
 	}
